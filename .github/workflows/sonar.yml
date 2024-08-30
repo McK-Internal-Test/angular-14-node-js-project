@@ -1,0 +1,106 @@
+name: scas
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the master branch
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  sonar_scan:
+    # The type of runner that the job will run on
+    runs-on: ${{ vars.SONAR_RUNS_ON }}
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      USER: ${{ secrets.ARTIFACTORY_USER }}
+      PASS: ${{ secrets.ARTIFACTORY_PASS }}
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@master
+      - name: Docker Login
+        run: docker login -u $USER -p $PASS mckinsey-docker.jfrog.io
+      
+      - name: Test
+        run: |
+          docker run -i --user=`id -u` --rm -e CI=true -e USER -e PASS -e ARTIFACTORY_URL=https://mckinsey.jfrog.io/artifactory/ -e RESOLVER_URL=https://mckinsey.jfrog.io/artifactory/api/npm/npm \
+          -v `pwd`:/app -w /app \
+          mckinsey-docker.jfrog.io/build-tools/firm-npm:14-gh-larger npm run test
+      - if: ${{ github.base_ref == null }}
+        name: Sonar Scan
+        run: |
+          docker run -i --user `id -u` --rm -e SONAR_TOKEN -e SONAR_HOST_URL \
+          -v `pwd`:/app -w /app mckinsey-docker.jfrog.io/sonarsource/sonar-scanner-cli:${{ vars.SONAR_SCANNER_CLI_VERSION }} \
+            -Dsonar.projectKey=10519-McK-Internal-Test_dts-getRepo-testing5 \
+            -Dsonar.sources=./ -Dsonar.branch.name=`echo "${{ github.ref }}" | cut -b 12-` \
+            -Dsonar.qualitygate.wait=false
+      - if: ${{ github.base_ref != null }}
+        name: Sonar Scan on PR
+        env:
+          pr_key: ${{ github.event.number }}
+          pr_branch: ${{ github.head_ref }}
+          pr_base: ${{ github.base_ref }}
+        run: |
+          docker run -i --user `id -u` --rm -e SONAR_TOKEN -e SONAR_HOST_URL \
+          -v `pwd`:/app -w /app mckinsey-docker.jfrog.io/sonarsource/sonar-scanner-cli:${{ vars.SONAR_SCANNER_CLI_VERSION }} \
+            -Dsonar.projectKey=10519-McK-Internal-Test_dts-getRepo-testing5 \
+            -Dsonar.sources=./ \
+            -Dsonar.pullrequest.key="$pr_key" \
+            -Dsonar.pullrequest.branch="$pr_branch" \
+            -Dsonar.pullrequest.base="$pr_base" \
+            -Dsonar.qualitygate.wait=false
+
+      - if: always()
+        name: Docker Logout
+        run: docker logout mckinsey-docker.jfrog.io
+
+  
+  xray_scan:
+    runs-on: [gh-larger-linux-small]
+    env:
+      USER: ${{ secrets.ARTIFACTORY_USER }}
+      PASS: ${{ secrets.ARTIFACTORY_PASS }}
+      JF_URL: https://mckinsey.jfrog.io/
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+      - name: Docker login
+        uses: docker/login-action@v2
+        with:
+          registry: mckinsey-docker.jfrog.io
+          username: ${{ secrets.ARTIFACTORY_USER }}
+          password: ${{ secrets.ARTIFACTORY_PASS }}
+      - name: Setup node
+        uses: actions/setup-node@v3
+        with:
+            check-latest: true
+      - name: Create npmrc
+        run: |
+          echo "registry=https://mckinsey.jfrog.io/artifactory/api/npm/npm/" > .npmrc && curl -u ${{ secrets.ARTIFACTORY_USER }}:${{ secrets.ARTIFACTORY_PASS }} https://mckinsey.jfrog.io/artifactory/api/npm/auth >> .npmrc
+          npm config fix
+      - name: npm install
+        run: |
+          npm install --verbose
+      - name: setup jf cli
+        uses: jfrog/setup-jfrog-cli@v3
+        with:
+          version: latest
+      - name: Configure jf cli
+        run: |
+          jf c add OSS-check --url='https://mckinsey.jfrog.io/' --user=${{ secrets.ARTIFACTORY_USER }} --password=${{ secrets.ARTIFACTORY_PASS }} --interactive=false
+          printf "\n\n"
+          jf c show
+          printf "\n\n"
+          jf c use OSS-check
+      - name: Run JF Audit
+        run: |
+          JFROG_CLI_LOG_LEVEL=DEBUG jf audit --npm true --licenses true
+      - if: always()
+        name: Docker Logout
+        run: |
+          docker logout mckinsey-docker.jfrog.io  
